@@ -1,6 +1,8 @@
 from flask import Flask, request
 from openpyxl import load_workbook
+import tempfile
 from openpyxl.drawing.image import Image
+from openpyxl_image_loader import SheetImageLoader
 import pandas as pd
 import pymysql
 import logging
@@ -28,12 +30,16 @@ def upload_excel():
     if file.filename == '':
         return 'No selected file', 400
 
+    # Crear un archivo temporal
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
+        file_path = tmp.name
+        file.save(file_path)
     # try:
     # # Read the Excel file
     excel_file = pd.read_excel(file, sheet_name=None)
 
     # Load the workbook and the specific sheet with openpyxl
-    wb = load_workbook(file.stream)
+    working_book = load_workbook(file_path)
 
     # We change to False the active status of each product
     execute_sql("UPDATE producto SET activo = 0 WHERE activo = 1;")
@@ -53,15 +59,29 @@ def upload_excel():
                               f'no se encontro la categoria en la base de datos')
                 continue
             else:
-                ws = wb[sheet_name]
+                working_sheet = working_book[sheet_name]
                 for index, row in dataframe.iterrows():
-                    row, validation = validate_data(row)
-                    cell = ws.cell(row=index, column=8)
+                    # calling the image_loader
+                    image_loader = SheetImageLoader(working_sheet)
+                    image_position = 'H' + str(index+1)
+                    # get the image (put the cell you need instead of 'A1')
+                    image = image_loader.get(image_position)
 
-                    for image in ws._images:
-                        if image.anchor == cell.coordinate:
-                            save_image_to_s3(image)
-                            return
+                    # showing the image
+                    image.show()
+
+                    # saving the image
+                    image.save('images/image_name.jpg')
+
+
+                    #row, validation = validate_data(row)
+                    #logging.info(row['IMAGEN'])
+                    #cell = ws.cell(row=index, column=8)
+
+                    # for image in ws._images:
+                    #     if image.anchor == cell.coordinate:
+                    #         save_image_to_s3(image)
+                    #         return
 
                     raise ValueError(f"No image found in cell '{cell}'.")
 
@@ -139,7 +159,7 @@ def validate_data(row):
     row['REFERENCIA'] = row['REFERENCIA'][:200] if pd.notna(row['REFERENCIA']) else None
     row['DESCRIPCION'] = row['DESCRIPCION'][:1000] if pd.notna(row['DESCRIPCION']) else None
     row['PRECIO EN ALMACENES DE CADENA'] = float(row['PRECIO EN ALMACENES DE CADENA']) if pd.notna(row['PRECIO EN ALMACENES DE CADENA']) else None
-    row['IMAGEN'] = row['IMAGEN'][:500] if pd.notna(row['IMAGEN']) else None
+    #row['IMAGEN'] = row['IMAGEN'][:500] if pd.notna(row['IMAGEN']) else None
 
     # Validate precio value
     precio_str = str(row['PRECIO EN ALMACENES DE CADENA'])
