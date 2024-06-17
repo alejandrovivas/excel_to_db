@@ -31,66 +31,48 @@ def upload_excel():
     if file.filename == '':
         return 'No selected file', 400
 
-    # try:
-    # Load the workbook and the specific sheet with openpyxl
-    working_book = load_workbook(file.stream)
-    errors = validate_empty_cells(working_book)
 
-    # Pre validate data
-    if errors:
-        return f'Existe errores en los siguientes datos {errors}', 400
-    else:
-        # We change to False the active status of each product
-        execute_sql("UPDATE producto SET activo = 0 WHERE activo = 1;")
+    try:
+        # Load the workbook and the specific sheet with openpyxl
+        working_book = load_workbook(file.stream)
+        errors = validate_empty_cells(working_book)
 
-        # Iter each excel sheet
-        # Check out each sheet
-        for sheet_name in working_book.sheetnames:
-            logging.info(f'Cargando datos: {sheet_name}')
+        # Pre validate data
+        if errors:
+            return f'Existe errores en los siguientes datos {errors}', 400
+        else:
+            # We change to False the active status of each product
+            execute_sql("UPDATE producto SET activo = 0 WHERE activo = 1;")
 
-            working_sheet = working_book[sheet_name]
+            # Check out each sheet
+            for sheet_name in working_book.sheetnames:
+                logging.info(f'Cargando datos: {sheet_name}')
 
-            # Convert sheet to dataframe
-            dataframe = pd.DataFrame(working_sheet.values)
-            logging.info(f'{dataframe}')
-            # Validate categories on local dictionary
-            category = find_category(sheet_name)
+                working_sheet = working_book[sheet_name]
 
-            if category:
-                # Get products category from database
-                category_db = execute_sql("SELECT id_categoria FROM categoria WHERE nombre=%s", (category,))
+                # Convert sheet to dataframe
+                dataframe = pd.DataFrame(working_sheet.values)
 
-                # Check if dictionary is empty
-                if not category_db:
-                    logging.error(f'Error cargando datos de la categoria {sheet_name}, '
-                                  f'no se encontro la categoria en la base de datos')
-                    continue
+                # Validate categories on local dictionary
+                category = find_category(sheet_name)
+
+                if category:
+                    # Get products category from database
+                    category_db = execute_sql("SELECT id_categoria FROM categoria WHERE nombre=%s", (category,))
+
+                    # Check if dictionary is empty
+                    if not category_db:
+                        logging.error(f'Error cargando datos de la categoria {sheet_name}, '
+                                      f'no se encontro la categoria en la base de datos')
+                    else:
+                        images_path = save_image_to_s3(working_sheet._images)
+                        get_dataframe_data(dataframe, images_path, category_db, sheet_name)
                 else:
-                    images_path = save_image_to_s3(working_sheet._images)
-                    first_iteration = True
-                    for index, row in dataframe.iterrows():
-                        if first_iteration:
-                            first_iteration = False
-                            continue
+                    logging.error(f'Error cargando datos de la categoria {sheet_name}, no se encontro la categoria en los archivos locales')
 
-                        # Clean price and cut data to fill the database
-                        row, validation = validate_data(row)
-
-                        if validation:
-                            query = """INSERT INTO producto (codigo_ean, titulo, descripcion, precio, url_imagen,
-                                    id_categoria, activo) VALUES (%s, %s, %s, %s, %s, %s %s)"""
-                            args = (row['CODIGO EAN'], row['REFERENCIA'], row['DESCRIPCION'],
-                                    row['PRECIO EN ALMACENES DE CADENA'], images_path[index], category['id_categoria'],
-                                    True)
-                            execute_sql(query, args)
-                        else:
-                            return f'Error uploading data: there is an error with file: {index} on {sheet_name} sheet'
-            else:
-                logging.error(f'Error cargando datos de la categoria {sheet_name}, no se encontro la categoria en los archivos locales')
-                continue
-    return 'Data uploaded successfully', 200
-    # except Exception as e:
-    #     return f'Error uploading data: {str(e)}', 500
+        return 'Data uploaded successfully', 200
+    except Exception as e:
+        return f'Error uploading data: {str(e)}', 500
 
 
 
@@ -109,10 +91,12 @@ def save_image_to_s3(images):
 
     # iter each image on the images column
     for img in images:
+        #Get image anchor and col
         anchor = img.anchor
-        col = anchor._from.col + 1  # openpyxl usa 0-index, sumamos 1 para convertir a 1-index
-        logging.info(col)
+        col = anchor._from.col + 1
+
         if col == 8:  # H1 is at (row=0, col=7)
+
             #Generate and save a random name for images
             image_name = ''.join(random.choices(string.ascii_letters + string.digits, k=15)) + '.png'
 
@@ -123,13 +107,35 @@ def save_image_to_s3(images):
             s3 = boto3.client('s3', aws_access_key_id=AWS_ACCESS_KEY_ID,
                               aws_secret_access_key=AWS_SECRET_ACCESS_KEY, region_name=AWS_DEFAULT_REGION)
             s3_key = f'imagenes/{image_name}'
-            s3.put_object(Bucket=AWS_BUCKET_NAME, Key=s3_key, Body=image_stream,
-                          ContentType='image/png')
+
+            # Put image on s3 bucket
+            s3.put_object(Bucket=AWS_BUCKET_NAME, Key=s3_key, Body=image_stream, ContentType='image/png')
             s3_url = f'https://{AWS_BUCKET_NAME}.s3.amazonaws.com/{s3_key}'
+
+            # Save images url on dict
             s3_urls.append(s3_url)
 
     return s3_urls
 
+def get_dataframe_data(dataframe, images_path, category_db, sheet_name):
+    # Use the first row as dataframe then skip it
+    dataframe.columns = dataframe.iloc[0]
+    dataframe = dataframe[1:]
+
+    # Iter on each row to commit data into database
+    for index, row in dataframe.iterrows():
+        # Clean price and cut data to fill the database
+        row, validation = validate_data(row)
+
+        # Commit data through sql query if it was validated
+        if validation:
+            query = """INSERT INTO producto (codigo_ean, titulo, descripcion, precio, url_imagen,id_categoria, activo) 
+            VALUES (%s, %s, %s, %s, %s, %s, %s)"""
+            args = (row['CODIGO EAN'], row['REFERENCIA'], row['DESCRIPCION'], row['PRECIO EN ALMACENES DE CADENA'],
+                    images_path[index-2], category_db['id_categoria'], True)
+            execute_sql(query, args)
+        else:
+            return f'Error uploading data: there is an error with file: {index} on {sheet_name} sheet'
 
 def execute_sql(query, args=None):
     # Connect to the database
@@ -205,4 +211,4 @@ def validate_data(row):
     return row, True
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8001, debug=True)
+    app.run(host='0.0.0.0', port=8001)
